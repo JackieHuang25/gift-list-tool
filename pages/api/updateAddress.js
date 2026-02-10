@@ -180,9 +180,8 @@ async function getGraphAccessToken() {
   return data.access_token;
 }
 
-async function downloadCsvContent() {
-  const shareLink = process.env.SHARE_LINK;
-  if (!shareLink) throw new Error('Missing SHARE_LINK');
+async function downloadContent(shareLink, missingMessage) {
+  if (!shareLink) throw new Error(missingMessage);
 
   const accessToken = await getGraphAccessToken();
   const shareId = encodeShareLink(shareLink);
@@ -194,15 +193,14 @@ async function downloadCsvContent() {
 
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Failed to download CSV: ${errorText}`);
+    throw new Error(`Failed to download content: ${errorText}`);
   }
 
   return await res.text();
 }
 
-async function uploadCsvContent(csvContent) {
-  const shareLink = process.env.SHARE_LINK;
-  if (!shareLink) throw new Error('Missing SHARE_LINK');
+async function uploadContent(shareLink, content, contentType, missingMessage) {
+  if (!shareLink) throw new Error(missingMessage);
 
   const accessToken = await getGraphAccessToken();
   const shareId = encodeShareLink(shareLink);
@@ -212,14 +210,14 @@ async function uploadCsvContent(csvContent) {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'text/csv'
+      'Content-Type': contentType
     },
-    body: csvContent
+    body: content
   });
 
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Failed to upload CSV: ${errorText}`);
+    throw new Error(`Failed to upload content: ${errorText}`);
   }
 }
 
@@ -247,8 +245,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing token or address' });
   }
 
-  const filePath = path.join(process.cwd(), 'gift_list_token.json');
-  const giftList = JSON.parse(fs.readFileSync(filePath));
+  let giftList = [];
+  try {
+    const tokenShareLink = process.env.TOKEN_SHARE_LINK;
+    const tokenContent = await downloadContent(
+      tokenShareLink,
+      'Missing TOKEN_SHARE_LINK'
+    );
+    giftList = JSON.parse(tokenContent);
+  } catch (err) {
+    console.error('Failed to read gift_list_token.json:', err);
+    return res.status(500).json({ error: 'Failed to read gift_list_token.json' });
+  }
 
   const index = giftList.findIndex((r) => r.token === token);
   if (index === -1) {
@@ -284,7 +292,10 @@ export default async function handler(req, res) {
 
   let rows = [];
   try {
-    const csvContent = await downloadCsvContent();
+    const csvContent = await downloadContent(
+      process.env.SHARE_LINK,
+      'Missing SHARE_LINK'
+    );
     const parsed = await readCsvContent(csvContent);
     rows = parsed.rows;
 
@@ -313,12 +324,27 @@ export default async function handler(req, res) {
   });
 
   giftList[index] = updated;
-  fs.writeFileSync(filePath, JSON.stringify(giftList, null, 2));
+  try {
+    await uploadContent(
+      process.env.TOKEN_SHARE_LINK,
+      JSON.stringify(giftList, null, 2),
+      'application/json',
+      'Missing TOKEN_SHARE_LINK'
+    );
+  } catch (err) {
+    console.error('Failed to update gift_list_token.json:', err);
+    return res.status(500).json({ error: 'Failed to update gift_list_token.json' });
+  }
 
   try {
     // Save the submitted row right under the original row in gift_list.csv.
     const csvOutput = buildUpdatedCsv(result, rows);
-    await uploadCsvContent(csvOutput);
+    await uploadContent(
+      process.env.SHARE_LINK,
+      csvOutput,
+      'text/csv',
+      'Missing SHARE_LINK'
+    );
   } catch (err) {
     console.error('Failed to update gift_list.csv:', err);
     return res.status(500).json({ error: 'Failed to update gift_list.csv' });
