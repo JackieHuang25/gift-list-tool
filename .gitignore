@@ -17,3 +17,11 @@ yarn-error.log*
 # misc
 .DS_Store
 
+# vercel
+.vercel/
+
+# data files
+gift_list.csv
+gift_list_results.csv
+gift_list_token.json
+
