@@ -24,4 +24,6 @@ yarn-error.log*
 gift_list.csv
 gift_list_results.csv
 gift_list_token.json
+gift_list.xlsx
+~$*.xlsx
 
