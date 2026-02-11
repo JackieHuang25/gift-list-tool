@@ -1,4 +1,50 @@
 // pages/api/getAddress.js
+import ExcelJS from 'exceljs';
+
+const csvHeaders = [
+  '*Order Number',
+  'Backer No.',
+  '*Reward Name',
+  '*Item Quantity',
+  '*Full Name',
+  'Phone Number',
+  '*Country/Region Code',
+  'State/Province/Region',
+  '*City',
+  '*Address1',
+  'Address2',
+  'Zip Code',
+  'Email',
+  'Total Payment',
+  'Match Status',
+  'Changed Fields',
+  'Changed Values',
+  'Submitted At',
+  'Token Link'
+];
+
+const csvHeaderMap = {
+  'Order Number': '*Order Number',
+  'Backer No.': 'Backer No.',
+  'Reward Name': '*Reward Name',
+  'Item Quantity': '*Item Quantity',
+  'Full Name': '*Full Name',
+  'Phone Number': 'Phone Number',
+  'Country/Region Code': '*Country/Region Code',
+  'State/Province/Region': 'State/Province/Region',
+  'City': '*City',
+  'Address1': '*Address1',
+  'Address2': 'Address2',
+  'Zip Code': 'Zip Code',
+  'Email': 'Email',
+  'Total Payment': 'Total Payment',
+  'Match Status': 'Match Status',
+  'Changed Fields': 'Changed Fields',
+  'Changed Values': 'Changed Values',
+  'Submitted At': 'Submitted At',
+  'Token Link': 'Token Link'
+};
+
 function encodeShareLink(link) {
   const base64 = Buffer.from(link)
     .toString('base64')
@@ -40,9 +86,9 @@ async function getGraphAccessToken() {
   return data.access_token;
 }
 
-async function downloadTokenContent() {
-  const shareLink = process.env.TOKEN_SHARE_LINK;
-  if (!shareLink) throw new Error('Missing TOKEN_SHARE_LINK');
+async function downloadWorkbookContent() {
+  const shareLink = process.env.SHARE_LINK;
+  if (!shareLink) throw new Error('Missing SHARE_LINK');
 
   const accessToken = await getGraphAccessToken();
   const shareId = encodeShareLink(shareLink);
@@ -54,27 +100,107 @@ async function downloadTokenContent() {
 
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Failed to download token content: ${errorText}`);
+    throw new Error(`Failed to download XLSX content: ${errorText}`);
   }
 
-  return await res.text();
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+function buildTokenLink(token) {
+  return `https://gift-list-tool.vercel.app/?token=${token}`;
+}
+
+function matchesToken(rowToken, token) {
+  if (!rowToken) return false;
+  const tokenLink = buildTokenLink(token);
+  return rowToken === tokenLink || rowToken.endsWith(`?token=${token}`) || rowToken === token;
+}
+
+function normalizeCsvRow(row) {
+  const normalized = {};
+  csvHeaders.forEach((h) => {
+    normalized[h] = row[h] ?? '';
+  });
+  return normalized;
+}
+
+function csvRowToStandard(row) {
+  const standard = {};
+  Object.keys(csvHeaderMap).forEach((standardKey) => {
+    const csvKey = csvHeaderMap[standardKey];
+    standard[standardKey] = row[csvKey] ?? '';
+  });
+  return standard;
+}
+
+function normalizeCellValue(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (Array.isArray(value.richText)) {
+      return value.richText.map((part) => part.text || '').join('');
+    }
+    if (value.formula && value.result != null) return String(value.result);
+    if (value.hyperlink) return value.text || value.hyperlink;
+  }
+  return String(value);
+}
+
+async function readWorkbook(buffer) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return [];
+
+  const headerRow = worksheet.getRow(1).values.slice(1);
+  const rows = [];
+  for (let rowIndex = 2; rowIndex <= worksheet.rowCount; rowIndex += 1) {
+    const row = worksheet.getRow(rowIndex);
+    if (row.actualCellCount === 0) continue;
+    const obj = {};
+    headerRow.forEach((header, index) => {
+      if (!header) return;
+      const cellValue = row.getCell(index + 1).value;
+      obj[header] = normalizeCellValue(cellValue);
+    });
+    rows.push(obj);
+  }
+
+  return rows;
 }
 
 export default async function handler(req, res) {
   const { token } = req.query;
 
-  let giftList = [];
-  try {
-    const tokenContent = await downloadTokenContent();
-    giftList = JSON.parse(tokenContent);
-  } catch (err) {
-    console.error('Failed to read gift_list_token.json:', err);
-    return res.status(500).json({ error: 'Failed to read gift_list_token.json' });
+  if (!token) {
+    return res.status(400).json({ error: 'Missing token' });
   }
 
-  const record = giftList.find((r) => r.token === token);
-  if (!record) return res.status(404).json({ error: 'Invalid token' });
-  if (record.expire < Date.now()) return res.status(403).json({ error: 'Token expired' });
+  let rows = [];
+  try {
+    const workbookBuffer = await downloadWorkbookContent();
+    rows = await readWorkbook(workbookBuffer);
+  } catch (err) {
+    console.error('Failed to read gift_list.xlsx:', err);
+    return res.status(500).json({ error: 'Failed to read gift_list.xlsx' });
+  }
+
+  const normalizedRows = rows.map((row) => normalizeCsvRow(row));
+  const tokenHeader = csvHeaderMap['Token Link'];
+  let match = null;
+  for (let i = normalizedRows.length - 1; i >= 0; i -= 1) {
+    if (matchesToken(normalizedRows[i][tokenHeader], token)) {
+      match = normalizedRows[i];
+      break;
+    }
+  }
+  if (!match) return res.status(404).json({ error: 'Invalid token' });
+
+  const record = csvRowToStandard(match);
+  if (record.expire && record.expire < Date.now()) {
+    return res.status(403).json({ error: 'Token expired' });
+  }
 
   return res.status(200).json(record);
 }

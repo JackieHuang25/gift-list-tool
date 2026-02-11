@@ -1,9 +1,5 @@
 // pages/api/updateAddress.js
-import fs from 'fs';
-import path from 'path';
-import { parse } from 'json2csv';
-import csvParser from 'csv-parser';
-import { Readable } from 'stream';
+import ExcelJS from 'exceljs';
 
 const csvHeaders = [
   '*Order Number',
@@ -23,12 +19,13 @@ const csvHeaders = [
   'Match Status',
   'Changed Fields',
   'Changed Values',
-  'Submitted At'
+  'Submitted At',
+  'Token Link'
 ];
 
 const csvHeaderMap = {
   'Order Number': '*Order Number',
-  'Double Check No': 'Backer No.',
+  'Backer No.': 'Backer No.',
   'Reward Name': '*Reward Name',
   'Item Quantity': '*Item Quantity',
   'Full Name': '*Full Name',
@@ -44,7 +41,8 @@ const csvHeaderMap = {
   'Match Status': 'Match Status',
   'Changed Fields': 'Changed Fields',
   'Changed Values': 'Changed Values',
-  'Submitted At': 'Submitted At'
+  'Submitted At': 'Submitted At',
+  'Token Link': 'Token Link'
 };
 
 const legacyHeaderMap = {
@@ -58,19 +56,54 @@ const legacyHeaderMap = {
   '*Address1': ['Address1']
 };
 
-function readCsvContent(csvContent) {
-  return new Promise((resolve, reject) => {
-    const rows = [];
-    let headers = [];
-    Readable.from([csvContent])
-      .pipe(csvParser())
-      .on('headers', (h) => {
-        headers = h;
-      })
-      .on('data', (data) => rows.push(data))
-      .on('end', () => resolve({ headers, rows }))
-      .on('error', reject);
+function normalizeCellValue(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (Array.isArray(value.richText)) {
+      return value.richText.map((part) => part.text || '').join('');
+    }
+    if (value.formula && value.result != null) return String(value.result);
+    if (value.hyperlink) return value.text || value.hyperlink;
+  }
+  return String(value);
+}
+
+async function readWorkbook(buffer) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) {
+    return { sheetName: 'Sheet1', rows: [] };
+  }
+
+  const headerRow = worksheet.getRow(1).values.slice(1);
+  const rows = [];
+  for (let rowIndex = 2; rowIndex <= worksheet.rowCount; rowIndex += 1) {
+    const row = worksheet.getRow(rowIndex);
+    if (row.actualCellCount === 0) continue;
+    const obj = {};
+    headerRow.forEach((header, index) => {
+      if (!header) return;
+      const cellValue = row.getCell(index + 1).value;
+      obj[header] = normalizeCellValue(cellValue);
+    });
+    rows.push(obj);
+  }
+
+  return { sheetName: worksheet.name || 'Sheet1', rows };
+}
+
+async function writeWorkbook(rows, sheetName) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName || 'Sheet1');
+  worksheet.addRow(csvHeaders);
+  rows.forEach((row) => {
+    const values = csvHeaders.map((header) => row[header] ?? '');
+    worksheet.addRow(values);
   });
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer);
 }
 
 function normalizeCsvRow(row) {
@@ -95,9 +128,16 @@ function normalizeCsvRow(row) {
   return normalized;
 }
 
-function buildUpdatedCsv(result, rows) {
-  const normalizedRows = rows.map((row) => normalizeCsvRow(row));
+function csvRowToStandard(row) {
+  const standard = {};
+  Object.keys(csvHeaderMap).forEach((standardKey) => {
+    const csvKey = csvHeaderMap[standardKey];
+    standard[standardKey] = row[csvKey] ?? '';
+  });
+  return standard;
+}
 
+function buildUpdatedRows(result, normalizedRows) {
   const updatedRow = {};
   csvHeaders.forEach((h) => {
     updatedRow[h] = '';
@@ -112,7 +152,7 @@ function buildUpdatedCsv(result, rows) {
     if (header) updatedRow[header] = result.submitted[k];
   });
 
-  const changedValues = result.comparison.diffs.map((k) => {
+  const changedValues = result.comparison.changedValues || result.comparison.diffs.map((k) => {
     const fromVal = result.original[k] ?? '';
     const toVal = result.submitted[k] ?? '';
     return `${k}: ${fromVal} -> ${toVal}`;
@@ -122,12 +162,13 @@ function buildUpdatedCsv(result, rows) {
   updatedRow[csvHeaderMap['Changed Fields']] = result.comparison.diffs.join(',');
   updatedRow[csvHeaderMap['Changed Values']] = changedValues.join(' | ');
   updatedRow[csvHeaderMap['Submitted At']] = result.submittedAt;
+  updatedRow[csvHeaderMap['Token Link']] = result.tokenLink;
 
   const orderHeader = csvHeaderMap['Order Number'];
-  const backerHeader = csvHeaderMap['Double Check No'];
+  const backerHeader = csvHeaderMap['Backer No.'];
   const origIndex = normalizedRows.findIndex(
     (r) => r[orderHeader] === result.identifiers.OrderNumber &&
-      r[backerHeader] === result.identifiers.DoubleCheckNo
+      r[backerHeader] === result.identifiers.BackerNo
   );
 
   if (origIndex === -1) {
@@ -136,7 +177,17 @@ function buildUpdatedCsv(result, rows) {
     normalizedRows.splice(origIndex + 1, 0, updatedRow);
   }
 
-  return parse(normalizedRows, { fields: csvHeaders });
+  return normalizedRows;
+}
+
+function buildTokenLink(token) {
+  return `https://gift-list-tool.vercel.app/?token=${token}`;
+}
+
+function matchesToken(rowToken, token) {
+  if (!rowToken) return false;
+  const tokenLink = buildTokenLink(token);
+  return rowToken === tokenLink || rowToken.endsWith(`?token=${token}`) || rowToken === token;
 }
 
 function encodeShareLink(link) {
@@ -196,7 +247,8 @@ async function downloadContent(shareLink, missingMessage) {
     throw new Error(`Failed to download content: ${errorText}`);
   }
 
-  return await res.text();
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
 }
 
 async function uploadContent(shareLink, content, contentType, missingMessage) {
@@ -223,7 +275,6 @@ async function uploadContent(shareLink, content, contentType, missingMessage) {
 
 export default async function handler(req, res) {
   const editableFields = [
-    'Double Check No',
     'Full Name',
     'Phone Number',
     'Country/Region Code',
@@ -245,66 +296,38 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing token or address' });
   }
 
-  let giftList = [];
-  try {
-    const tokenShareLink = process.env.TOKEN_SHARE_LINK;
-    const tokenContent = await downloadContent(
-      tokenShareLink,
-      'Missing TOKEN_SHARE_LINK'
-    );
-    giftList = JSON.parse(tokenContent);
-  } catch (err) {
-    console.error('Failed to read gift_list_token.json:', err);
-    return res.status(500).json({ error: 'Failed to read gift_list_token.json' });
-  }
-
-  const index = giftList.findIndex((r) => r.token === token);
-  if (index === -1) {
-    return res.status(404).json({ error: 'Invalid token' });
-  }
-  if (giftList[index].expire < Date.now()) {
-    return res.status(403).json({ error: 'Token expired' });
-  }
-
-  const original = giftList[index];
-  const fields = editableFields.filter((k) => k in original);
-
-  const diffs = fields.filter((k) => {
-    const originalVal = original[k] ?? '';
-    const newVal = address[k] ?? '';
-    return String(originalVal) !== String(newVal);
-  });
-
-  const matchStatus = diffs.length === 0 ? 'MATCH' : 'MISMATCH';
-
-  const result = {
-    token,
-    submittedAt: new Date().toISOString(),
-    identifiers: {
-      OrderNumber: original['Order Number'],
-      DoubleCheckNo: original['Double Check No'],
-      Email: original['Email']
-    },
-    comparison: { matchStatus, diffs },
-    original: { ...original },
-    submitted: { ...address }
-  };
-
+  const tokenLink = buildTokenLink(token);
   let rows = [];
+  let normalizedRows = [];
+  let original = null;
+  let sheetName = 'Sheet1';
   try {
-    const csvContent = await downloadContent(
+    const workbookBuffer = await downloadContent(
       process.env.SHARE_LINK,
       'Missing SHARE_LINK'
     );
-    const parsed = await readCsvContent(csvContent);
+    const parsed = await readWorkbook(workbookBuffer);
     rows = parsed.rows;
+    sheetName = parsed.sheetName;
+    normalizedRows = rows.map((row) => normalizeCsvRow(row));
 
-    const normalizedRows = rows.map((row) => normalizeCsvRow(row));
+    const tokenHeader = csvHeaderMap['Token Link'];
+    const origIndex = normalizedRows.findIndex((row) =>
+      matchesToken(row[tokenHeader], token)
+    );
+
+    if (origIndex === -1) {
+      return res.status(404).json({ error: 'Invalid token' });
+    }
+
+    normalizedRows[origIndex][tokenHeader] = tokenLink;
+    original = csvRowToStandard(normalizedRows[origIndex]);
+
     const orderHeader = csvHeaderMap['Order Number'];
-    const backerHeader = csvHeaderMap['Double Check No'];
+    const backerHeader = csvHeaderMap['Backer No.'];
     const matchingRows = normalizedRows.filter(
-      (r) => r[orderHeader] === result.identifiers.OrderNumber &&
-        r[backerHeader] === result.identifiers.DoubleCheckNo
+      (r) => r[orderHeader] === original['Order Number'] &&
+        r[backerHeader] === original['Backer No.']
     ).length;
     const submissionCount = Math.max(0, matchingRows - 1);
 
@@ -314,41 +337,76 @@ export default async function handler(req, res) {
       });
     }
   } catch (err) {
-    console.error('Failed to read gift_list.csv:', err);
-    return res.status(500).json({ error: 'Failed to read gift_list.csv' });
+    console.error('Failed to read gift_list.xlsx:', err);
+    return res.status(500).json({ error: 'Failed to read gift_list.xlsx' });
   }
 
-  const updated = { ...original };
-  fields.forEach((k) => {
-    if (k in address) updated[k] = address[k];
+  if (!original) {
+    return res.status(404).json({ error: 'Invalid token' });
+  }
+
+  if (original.expire && original.expire < Date.now()) {
+    return res.status(403).json({ error: 'Token expired' });
+  }
+
+  const fields = editableFields.filter((k) => k in original);
+
+  const diffs = fields.filter((k) => {
+    const originalVal = original[k] ?? '';
+    const newVal = address[k] ?? '';
+    return String(originalVal) !== String(newVal);
   });
 
-  giftList[index] = updated;
-  try {
-    await uploadContent(
-      process.env.TOKEN_SHARE_LINK,
-      JSON.stringify(giftList, null, 2),
-      'application/json',
-      'Missing TOKEN_SHARE_LINK'
-    );
-  } catch (err) {
-    console.error('Failed to update gift_list_token.json:', err);
-    return res.status(500).json({ error: 'Failed to update gift_list_token.json' });
+  const matchStatus = diffs.length === 0 ? 'MATCH' : 'MISMATCH';
+  const changedValues = diffs.map((k) => {
+    const fromVal = original[k] ?? '';
+    const toVal = address[k] ?? '';
+    return `${k}: ${fromVal} -> ${toVal}`;
+  });
+
+  const result = {
+    token,
+    tokenLink,
+    submittedAt: new Date().toISOString(),
+    identifiers: {
+      OrderNumber: original['Order Number'],
+      BackerNo: original['Backer No.'],
+      Email: original['Email']
+    },
+    comparison: { matchStatus, diffs, changedValues },
+    original: { ...original },
+    submitted: { ...address }
+  };
+
+  const tokenHeader = csvHeaderMap['Token Link'];
+  const origIndex = normalizedRows.findIndex((row) =>
+    matchesToken(row[tokenHeader], token)
+  );
+  if (origIndex === -1) {
+    return res.status(404).json({ error: 'Invalid token' });
   }
 
+  fields.forEach((k) => {
+    if (k in address) {
+      const csvKey = csvHeaderMap[k];
+      if (csvKey) normalizedRows[origIndex][csvKey] = address[k];
+    }
+  });
+  normalizedRows[origIndex][tokenHeader] = tokenLink;
+
   try {
-    // Save the submitted row right under the original row in gift_list.csv.
-    const csvOutput = buildUpdatedCsv(result, rows);
+    const updatedRows = buildUpdatedRows(result, normalizedRows);
+    const workbookBuffer = await writeWorkbook(updatedRows, sheetName);
     await uploadContent(
       process.env.SHARE_LINK,
-      csvOutput,
-      'text/csv',
+      workbookBuffer,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Missing SHARE_LINK'
     );
   } catch (err) {
-    console.error('Failed to update gift_list.csv:', err);
-    return res.status(500).json({ error: 'Failed to update gift_list.csv' });
+    console.error('Failed to update gift_list.xlsx:', err);
+    return res.status(500).json({ error: 'Failed to update gift_list.xlsx' });
   }
 
-  return res.status(200).json({ matchStatus, diffs });
+  return res.status(200).json({ matchStatus, diffs, changedValues });
 }

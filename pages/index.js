@@ -5,7 +5,7 @@ import { Country, State, City } from 'country-state-city';
 export default function Home() {
   // Only allow customers to review/edit these fields.
   const editableFields = [
-    'Double Check No',
+    'Backer No.',
     'Full Name',
     'Phone Number',
     'Country/Region Code',
@@ -20,6 +20,11 @@ export default function Home() {
   const [token, setToken] = useState('');
   const [address, setAddress] = useState(null);
   const [message, setMessage] = useState('');
+  const [changeSummary, setChangeSummary] = useState([]);
+  const lastUpdated = address?.['Submitted At'];
+  const lastUpdatedText = lastUpdated
+    ? new Date(lastUpdated).toLocaleString()
+    : '';
 
   const selectedCountry = address?.['Country/Region Code'] || '';
   const selectedState = address?.['State/Province/Region'] || '';
@@ -44,17 +49,21 @@ useEffect(() => {
 }, []);
 
 
-  const loadAddress = async (t) => {
+  const loadAddress = async (t, options = {}) => {
     const currentToken = t || token;
     if(!currentToken) return;
 
-    setMessage('');
+    if (!options.preserveMessage) {
+      setMessage('');
+      setChangeSummary([]);
+    }
     const res = await fetch(`/api/getAddress?token=${currentToken}`);
     const data = await res.json();
     if(res.ok){
       setAddress(data);
     } else {
       setMessage(data.error);
+      setChangeSummary([]);
       setAddress(null);
     }
   }
@@ -68,9 +77,17 @@ useEffect(() => {
     });
     const data = await res.json();
     if(res.ok){
-      setMessage('Your information has been updated.');
+      if (data.changedValues && data.changedValues.length > 0) {
+        setMessage('Your information has been updated.');
+        setChangeSummary(data.changedValues);
+      } else {
+        setMessage('No changes detected. Your information is already up to date.');
+        setChangeSummary([]);
+      }
+      loadAddress(token, { preserveMessage: true });
     } else {
       setMessage(data.error);
+      setChangeSummary([]);
     }
   }
 
@@ -85,6 +102,16 @@ useEffect(() => {
   }
 
   const renderField = (k) => {
+    if (k === 'Backer No.') {
+      return (
+        <input
+          value={address[k] || ''}
+          readOnly
+          style={{width: 300, backgroundColor: '#f3f3f3'}}
+        />
+      );
+    }
+
     if (k === 'Country/Region Code') {
       return (
         <select
@@ -189,6 +216,21 @@ useEffect(() => {
       <p style={{marginTop: 8, color: '#555'}}>
         You can submit changes up to 3 times. Further submissions will be rejected.
       </p>
+      {changeSummary.length > 0 && (
+        <div style={{marginTop: 8}}>
+          <strong>Updated fields:</strong>
+          <ul>
+            {changeSummary.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {lastUpdatedText && (
+        <p style={{marginTop: 8, color: '#666'}}>
+          Last updated: {lastUpdatedText}
+        </p>
+      )}
       <p>{message}</p>
     </div>
   )
