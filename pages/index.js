@@ -57,7 +57,7 @@ useEffect(() => {
       setMessage('');
       setChangeSummary([]);
     }
-    const res = await fetch(`/api/getAddress?token=${currentToken}`);
+    const res = await fetch(`/api/get-address?token=${currentToken}`);
     const data = await res.json();
     if(res.ok){
       setAddress(data);
@@ -70,7 +70,7 @@ useEffect(() => {
 
   const submitAddress = async () => {
     setMessage('');
-    const res = await fetch('/api/updateAddress', {
+    const res = await fetch('/api/update-address', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ token, address })

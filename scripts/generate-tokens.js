@@ -238,8 +238,11 @@ async function main() {
   const workbookOutput = await writeWorkbook(normalizedRows, sheetName);
   await uploadContent(shareLink, workbookOutput);
 
-  fs.writeFileSync('gift_list_token.json', JSON.stringify(giftListWithToken, null, 2));
-  console.log('gift_list.xlsx updated and gift_list_token.json generated.');
+  const outputDir = path.join(process.cwd(), 'data', 'output');
+  const outputPath = path.join(outputDir, 'gift-list-token.json');
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputPath, JSON.stringify(giftListWithToken, null, 2));
+  console.log(`Workbook updated and token list written to ${outputPath}.`);
 }
 
 main().catch((err) => {
